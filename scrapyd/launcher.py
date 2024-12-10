@@ -54,11 +54,11 @@ class Launcher(Service):
 
     def _spawn_process(self, message, slot):
         project = message["_project"]
-        environ = self.app.getComponent(IEnvironment)
+        environment = self.app.getComponent(IEnvironment)
         message.setdefault("settings", {})
-        message["settings"].update(environ.get_settings(message))
+        message["settings"].update(environment.get_settings(message))
 
-        env = environ.get_environment(message, slot)
+        env = environment.get_environment(message, slot)
         args = [sys.executable, "-m", self.runner, "crawl", *get_crawl_args(message)]
 
         process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)
@@ -88,21 +88,34 @@ class Launcher(Service):
 # https://docs.twisted.org/en/stable/api/twisted.internet.protocol.ProcessProtocol.html
 class ScrapyProcessProtocol(protocol.ProcessProtocol):
     def __init__(self, project, spider, job, env, args):
-        self.pid = None
         self.project = project
         self.spider = spider
         self.job = job
+        self.pid = None
         self.start_time = datetime.datetime.now()
         self.end_time = None
-        self.env = env
         self.args = args
+        self.env = env
         self.deferred = defer.Deferred()
+
+    # For equality assertions in tests.
+    def __eq__(self, other):
+        return (
+            self.project == other.project
+            and self.spider == other.spider
+            and self.job == other.job
+            and self.pid == other.pid
+            and self.start_time == other.start_time
+            and self.end_time == other.end_time
+            and self.args == other.args
+            and self.env == other.env
+        )
 
     # For error messsages in tests.
     def __repr__(self):
         return (
-            f"ScrapyProcessProtocol(pid={self.pid} project={self.project} spider={self.spider} job={self.job} "
-            f"start_time={self.start_time} end_time={self.end_time} env={self.env} args={self.args})"
+            f"ScrapyProcessProtocol(project={self.project} spider={self.spider} job={self.job} pid={self.pid} "
+            f"start_time={self.start_time} end_time={self.end_time} args={self.args} env={self.env})"
         )
 
     def outReceived(self, data):
@@ -122,15 +135,6 @@ class ScrapyProcessProtocol(protocol.ProcessProtocol):
         else:
             self.log("error", f"Process died: exitstatus={status.value.exitCode!r}")
         self.deferred.callback(self)
-
-    def asdict(self):
-        return {
-            "project": self.project,
-            "spider": self.spider,
-            "id": self.job,
-            "pid": self.pid,
-            "start_time": str(self.start_time),
-        }
 
     def log(self, level, action):
         getattr(log, level)(

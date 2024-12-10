@@ -1,7 +1,7 @@
+import datetime
 import json
 import os
 import sqlite3
-from datetime import datetime
 
 
 # The database argument is "jobs" (in SqliteJobStorage), or a project (in SqliteSpiderQueue) from get_spider_queues(),
@@ -19,6 +19,19 @@ def initialize(cls, config, database, table):
     return cls(connection_string, table)
 
 
+# https://docs.python.org/3/library/sqlite3.html#sqlite3-adapter-converter-recipes
+def adapt_datetime(val):
+    return val.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def convert_datetime(val):
+    return datetime.datetime.strptime(val.decode(), "%Y-%m-%d %H:%M:%S.%f")
+
+
+sqlite3.register_adapter(datetime.datetime, adapt_datetime)
+sqlite3.register_converter("datetime", convert_datetime)
+
+
 class SqliteMixin:
     def __init__(self, database, table):
         self.database = database or ":memory:"
@@ -29,6 +42,8 @@ class SqliteMixin:
     def __len__(self):
         return self.conn.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()[0]
 
+    # SQLite JSON is enabled by default since 3.38.0 (2022-02-22), and JSONB is available since 3.45.0 (2024-01-15).
+    # https://sqlite.org/json1.html
     def encode(self, obj):
         return sqlite3.Binary(json.dumps(obj).encode("ascii"))
 
@@ -137,8 +152,8 @@ class SqliteFinishedJobs(SqliteMixin):
                 project,
                 spider,
                 job,
-                datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f"),
-                datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S.%f"),
+                datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f"),
+                datetime.datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S.%f"),
             )
             for project, spider, job, start_time, end_time in self.conn.execute(
                 f"SELECT project, spider, job, start_time, end_time FROM {self.table} ORDER BY end_time DESC"

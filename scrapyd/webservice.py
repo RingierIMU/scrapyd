@@ -16,7 +16,6 @@ from twisted.logger import Logger
 from twisted.web import error, http, resource
 
 from scrapyd.exceptions import EggNotFoundError, ProjectNotFoundError, RunnerError
-from scrapyd.utils import job_items_url, job_log_url
 
 log = Logger()
 
@@ -33,17 +32,17 @@ def param(
     encoded = decoded.encode()
     if dest is None:
         dest = decoded
-    if callable(default):
-        default = default()
 
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, txrequest, *args, **kwargs):
+            default_value = default() if callable(default) else default
+
             if encoded not in txrequest.args:
                 if required:
                     raise error.Error(code=http.OK, message=b"'%b' parameter is required" % encoded)
 
-                value = default
+                value = default_value
             else:
                 values = (value.decode() if type is str else type(value) for value in txrequest.args.pop(encoded))
                 try:
@@ -125,7 +124,7 @@ class WsResource(resource.Resource):
 
     def render(self, txrequest):
         try:
-            obj = super().render(txrequest)
+            data = super().render(txrequest)
         except Exception as e:  # noqa: BLE001
             log.failure("")
 
@@ -136,24 +135,37 @@ class WsResource(resource.Resource):
                 return traceback.format_exc().encode()
 
             message = e.message.decode() if isinstance(e, error.Error) else f"{type(e).__name__}: {e}"
-            obj = {"node_name": self.root.nodename, "status": "error", "message": message}
+            data = {"status": "error", "message": message}
+        else:
+            if data is not None:
+                data["status"] = "ok"
 
-        content = b"" if obj is None else self.json_encoder.encode(obj).encode() + b"\n"
-        txrequest.setHeader("Content-Type", "application/json")
+        if data is None:  # render_OPTIONS
+            content = b""
+        else:
+            data["node_name"] = self.root.node_name
+            content = self.json_encoder.encode(data).encode() + b"\n"
+            txrequest.setHeader("Content-Type", "application/json")
+
+        # https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS#preflighted_requests
         txrequest.setHeader("Access-Control-Allow-Origin", "*")
-        txrequest.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE")
-        txrequest.setHeader("Access-Control-Allow-Headers", " X-Requested-With")
+        txrequest.setHeader("Access-Control-Allow-Methods", self.methods)
+        txrequest.setHeader("Access-Control-Allow-Headers", "X-Requested-With")
         txrequest.setHeader("Content-Length", str(len(content)))
         return content
 
     def render_OPTIONS(self, txrequest):
+        txrequest.setHeader("Allow", self.methods)
+        txrequest.setResponseCode(http.NO_CONTENT)
+
+    @functools.cached_property
+    def methods(self):
         methods = ["OPTIONS", "HEAD"]
         if hasattr(self, "render_GET"):
             methods.append("GET")
         if hasattr(self, "render_POST"):
             methods.append("POST")
-        txrequest.setHeader("Allow", ", ".join(methods))
-        txrequest.setResponseCode(http.NO_CONTENT)
+        return ", ".join(methods)
 
 
 class DaemonStatus(WsResource):
@@ -162,16 +174,10 @@ class DaemonStatus(WsResource):
     """
 
     def render_GET(self, txrequest):
-        pending = sum(queue.count() for queue in self.root.poller.queues.values())
-        running = len(self.root.launcher.processes)
-        finished = len(self.root.launcher.finished)
-
         return {
-            "node_name": self.root.nodename,
-            "status": "ok",
-            "pending": pending,
-            "running": running,
-            "finished": finished,
+            "pending": sum(queue.count() for queue in self.root.poller.queues.values()),
+            "running": len(self.root.launcher.processes),
+            "finished": len(self.root.launcher.finished),
         }
 
 
@@ -213,7 +219,7 @@ class Schedule(WsResource):
             _job=jobid,
             **args,
         )
-        return {"node_name": self.root.nodename, "status": "ok", "jobid": jobid}
+        return {"jobid": jobid}
 
 
 class Cancel(WsResource):
@@ -237,7 +243,7 @@ class Cancel(WsResource):
                 process.transport.signalProcess(signal)
                 prevstate = "running"
 
-        return {"node_name": self.root.nodename, "status": "ok", "prevstate": prevstate}
+        return {"prevstate": prevstate}
 
 
 class AddVersion(WsResource):
@@ -254,27 +260,18 @@ class AddVersion(WsResource):
         self.root.update_projects()
 
         spiders = spider_list.set(project, version, runner=self.root.runner)
-
-        return {
-            "node_name": self.root.nodename,
-            "status": "ok",
-            "project": project,
-            "version": version,
-            "spiders": len(spiders),
-        }
+        return {"project": project, "version": version, "spiders": len(spiders)}
 
 
 class ListProjects(WsResource):
     def render_GET(self, txrequest):
-        projects = self.root.scheduler.list_projects()
-        return {"node_name": self.root.nodename, "status": "ok", "projects": projects}
+        return {"projects": self.root.scheduler.list_projects()}
 
 
 class ListVersions(WsResource):
     @param("project")
     def render_GET(self, txrequest, project):
-        versions = self.root.eggstorage.list(project)
-        return {"node_name": self.root.nodename, "status": "ok", "versions": versions}
+        return {"versions": self.root.eggstorage.list(project)}
 
 
 class ListSpiders(WsResource):
@@ -292,9 +289,7 @@ class ListSpiders(WsResource):
         if version and self.root.eggstorage.get(project, version) == (None, None):
             raise error.Error(code=http.OK, message=b"version '%b' not found" % version.encode())
 
-        spiders = spider_list.get(project, version, runner=self.root.runner)
-
-        return {"node_name": self.root.nodename, "status": "ok", "spiders": spiders}
+        return {"spiders": spider_list.get(project, version, runner=self.root.runner)}
 
 
 class Status(WsResource):
@@ -309,7 +304,7 @@ class Status(WsResource):
         if project is not None and project not in queues:
             raise error.Error(code=http.OK, message=b"project '%b' not found" % project.encode())
 
-        result = {"node_name": self.root.nodename, "status": "ok", "currstate": None}
+        result = {"currstate": None}
 
         for finished in self.root.launcher.finished:
             if (project is None or finished.project == project) and finished.job == job:
@@ -351,13 +346,11 @@ class ListJobs(WsResource):
             raise error.Error(code=http.OK, message=b"project '%b' not found" % project.encode())
 
         return {
-            "node_name": self.root.nodename,
-            "status": "ok",
             "pending": [
                 {
+                    "id": message["_job"],
                     "project": queue_name,
                     "spider": message["name"],
-                    "id": message["_job"],
                     "version": message.get("_version"),
                     "settings": message.get("settings", {}),
                     "args": {k: v for k, v in message.items() if k not in ("name", "_job", "_version", "settings")},
@@ -366,19 +359,27 @@ class ListJobs(WsResource):
                 for message in queues[queue_name].list()
             ],
             "running": [
-                process.asdict()
+                {
+                    "id": process.job,
+                    "project": process.project,
+                    "spider": process.spider,
+                    "pid": process.pid,
+                    "start_time": str(process.start_time),
+                    "log_url": self.root.get_log_url(process),
+                    "items_url": self.root.get_item_url(process),
+                }
                 for process in self.root.launcher.processes.values()
                 if project is None or process.project == project
             ],
             "finished": [
                 {
+                    "id": finished.job,
                     "project": finished.project,
                     "spider": finished.spider,
-                    "id": finished.job,
                     "start_time": str(finished.start_time),
                     "end_time": str(finished.end_time),
-                    "log_url": job_log_url(finished),
-                    "items_url": job_items_url(finished),
+                    "log_url": self.root.get_log_url(finished),
+                    "items_url": self.root.get_item_url(finished),
                 }
                 for finished in self.root.launcher.finished
                 if project is None or finished.project == project
@@ -391,7 +392,7 @@ class DeleteProject(WsResource):
     def render_POST(self, txrequest, project):
         self._delete_version(project)
         spider_list.delete(project)
-        return {"node_name": self.root.nodename, "status": "ok"}
+        return {}
 
     def _delete_version(self, project, version=None):
         try:
@@ -410,4 +411,4 @@ class DeleteVersion(DeleteProject):
     def render_POST(self, txrequest, project, version):
         self._delete_version(project, version)
         spider_list.delete(project, version)
-        return {"node_name": self.root.nodename, "status": "ok"}
+        return {}

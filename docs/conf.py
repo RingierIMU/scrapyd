@@ -9,7 +9,7 @@
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
-import os
+import os.path
 import sys
 
 sys.path.insert(0, os.path.abspath(".."))
@@ -22,7 +22,7 @@ copyright = "2013-2023, Scrapy group"
 author = "Scrapy group"
 
 # The short X.Y version
-version = "1.5.0b1"
+version = "1.5.0"
 # The full version, including alpha/beta/rc tags
 release = version
 

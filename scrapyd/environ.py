@@ -1,13 +1,14 @@
 import json
 import os
 from contextlib import suppress
-from urllib.parse import urlparse, urlunparse
+from posixpath import join as urljoin
+from urllib.parse import urlsplit
 
 from w3lib.url import path_to_file_uri
 from zope.interface import implementer
 
-from scrapyd.exceptions import DirectoryTraversalError
 from scrapyd.interfaces import IEnvironment
+from scrapyd.utils import get_file_path, local_items
 
 
 @implementer(IEnvironment)
@@ -23,9 +24,9 @@ class Environment:
     def get_settings(self, message):
         settings = {}
         if self.logs_dir:
-            settings["LOG_FILE"] = self._get_file(message, self.logs_dir, "log")
+            settings["LOG_FILE"] = self._prepare_file(message, self.logs_dir, "log")
         if self.items_dir:
-            settings["FEEDS"] = json.dumps({self._get_feed_uri(message, "jl"): {"format": "jsonlines"}})
+            settings["FEEDS"] = json.dumps({self._get_feeds(message, "jl"): {"format": "jsonlines"}})
         return settings
 
     def get_environment(self, message, slot):
@@ -44,47 +45,29 @@ class Environment:
 
         return env
 
-    def _get_feed_uri(self, message, extension):
-        url = urlparse(self.items_dir)
-        if url.scheme.lower() in ["", "file"]:
-            return path_to_file_uri(self._get_file(message, url.path, extension))
-        return urlunparse(
-            (
-                url.scheme,
-                url.netloc,
-                "/".join([url.path, message["_project"], message["_spider"], f"{message['_job']}.{extension}"]),
-                url.params,
-                url.query,
-                url.fragment,
-            )
-        )
+    def _get_feeds(self, message, extension):
+        parsed = urlsplit(self.items_dir)
 
-    def _get_file(self, message, directory, extension):
-        resolvedir = os.path.realpath(directory)
-        project = message["_project"]
-        spider = message["_spider"]
-        job = message["_job"]
-        projectdir = os.path.realpath(os.path.join(resolvedir, project))
-        spiderdir = os.path.realpath(os.path.join(projectdir, spider))
-        jobfile = os.path.realpath(os.path.join(spiderdir, f"{job}.{extension}"))
+        if local_items(self.items_dir, parsed):
+            # File URLs do not have query or fragment components. https://www.rfc-editor.org/rfc/rfc8089#section-2
+            return path_to_file_uri(self._prepare_file(message, parsed.path, extension))
 
-        if (
-            os.path.commonprefix((projectdir, resolvedir)) != resolvedir
-            or os.path.commonprefix((spiderdir, projectdir)) != projectdir
-            or os.path.commonprefix((jobfile, spiderdir)) != spiderdir
-        ):
-            raise DirectoryTraversalError(os.path.join(project, spider, f"{job}.{extension}"))
+        path = urljoin(parsed.path, message["_project"], message["_spider"], f"{message['_job']}.{extension}")
+        return parsed._replace(path=path).geturl()
 
-        if not os.path.exists(spiderdir):
-            os.makedirs(spiderdir)
+    def _prepare_file(self, message, directory, extension):
+        file_path = get_file_path(directory, message["_project"], message["_spider"], message["_job"], extension)
+
+        parent = file_path.dirname()  # returns a str
+        if not os.path.exists(parent):
+            os.makedirs(parent)
 
         to_delete = sorted(
-            (os.path.join(spiderdir, name) for name in os.listdir(spiderdir)),
+            (os.path.join(parent, name) for name in os.listdir(parent)),
             key=os.path.getmtime,
         )[: -self.jobs_to_keep]
-
         for path in to_delete:
             with suppress(OSError):
                 os.remove(path)
 
-        return jobfile
+        return file_path.path
