@@ -3,7 +3,28 @@ Release notes
 
 .. changelog
 
-1.5.0b1 (2024-07-19)
+Unreleased
+----------
+
+Removed
+~~~~~~~
+
+- Drop support for end-of-life Python version 3.8.
+
+1.5.0 (2024-09-05)
+------------------
+
+Added
+~~~~~
+
+- Default webservices can be disabled. See :ref:`config-services`.
+
+Fixed
+~~~~~
+
+- Restore the ``--nodaemon`` (``-n``) option (which Scrapyd enables, regardless), to avoid "option --nodaemon not recognized".
+
+1.5.0b1 (2024-07-25)
 --------------------
 
 This release contains the most changes in a decade. Therefore, a beta release is made first.
@@ -12,6 +33,7 @@ Added
 ~~~~~
 
 - Add ``version`` (egg version), ``settings`` (Scrapy settings) and ``args`` (spider arguments) to the pending jobs in the response from the :ref:`listjobs.json` webservice.
+- Add ``log_url`` and ``items_url`` to the running jobs in the response from the :ref:`listjobs.json` webservice.
 - Add a :ref:`status.json` webservice, to get the status of a job.
 - Add a :ref:`unix_socket_path` setting, to listen on a Unix socket.
 - Add a :ref:`poller` setting.
@@ -29,13 +51,14 @@ Changed
 ~~~~~~~
 
 - Every :ref:`poll_interval`, up to :ref:`max_proc` processes are started by the default :ref:`poller`, instead of only one process. (The number of running jobs will not exceed :ref:`max_proc`.)
-- Drop support for end-of-life Python version 3.7.
 
 Web UI
 ^^^^^^
 
+- Add basic CSS.
 - Add a confirmation dialog to the Cancel button.
 - Add "Last modified" column to the directory listings of log files and item feeds.
+- The Jobs page responds only to HTTP ``GET`` and ``HEAD`` method requests.
 
 API
 ^^^
@@ -63,8 +86,8 @@ CLI
 
 - Correct the usage message and long description.
 - Remove the ``--rundir`` option, which only works if ``*_dir`` settings are absolute paths.
-- Remove the ``--nodaemon`` option, which Scrapyd enables.
-- Remove the ``--python=`` option, which Scrapyd needs to set to its application.
+- Remove the ``--nodaemon`` (``-n``) option, which Scrapyd enables.
+- Remove the ``--python=`` (``-y``) option, which Scrapyd needs to set to its application.
 - Remove all ``twistd`` subcommands (FTP servers, etc.). Run ``twistd``, if needed.
 - Run the ``scrapyd.__main__`` module, instead of the ``scrapyd.scripts.scrapyd_run`` module.
 
@@ -76,8 +99,9 @@ Library
   - ``sorted_versions`` to ``scrapyd.eggstorage``
   - ``get_crawl_args`` to ``scrapyd.launcher``
 
+- :ref:`jobstorage` uses the ``ScrapyProcessProtocol`` class, by default. If :ref:`jobstorage` is set to ``scrapyd.jobstorage.SqliteJobStorage``, Scrapyd 1.3.0 uses a ``Job`` class, instead. To promote parity, the ``Job`` class is removed.
 - Move the ``activate_egg`` function from the ``scrapyd.eggutils`` module to its caller, the ``scrapyd.runner`` module.
-- Move the ``job_items_url`` and ``job_log_url`` functions from the ``scrapyd.jobstorage`` module to the ``scrapyd.utils`` module. :ref:`jobstorage` is not responsible for URLs.
+- Move the ``job_log_url`` and ``job_items_url`` functions into the ``Root`` class, since the ``Root`` class is responsible for file URLs.
 - Change the ``get_crawl_args`` function to no longer convert ``bytes`` to ``str``, as already done by its caller.
 - Change the ``scrapyd.app.create_wrapped_resource`` function to a ``scrapyd.basicauth.wrap_resource`` function.
 - Change the ``scrapyd.utils.sqlite_connection_string`` function to an ``scrapyd.sqlite.initialize`` function.
@@ -88,6 +112,7 @@ Fixed
 ~~~~~
 
 - Restore support for :ref:`eggstorage` implementations whose ``get()`` methods return file-like objects without ``name`` attributes (1.4.3 regression).
+- If the :ref:`items_dir` setting is a URL and the path component ends with ``/``, the ``FEEDS`` setting no longer contains double slashes.
 - The ``MemoryJobStorage`` class returns finished jobs in reverse chronological order, like the ``SqliteJobStorage`` class.
 - The ``list_projects`` method of the ``SpiderScheduler`` class returns a ``list``, instead of ``dict_keys``.
 - Log errors to Scrapyd's log, even when :ref:`debug` mode is enabled.
@@ -96,7 +121,9 @@ Fixed
 API
 ^^^
 
-- The Content-Length header counts the number of bytes, instead of the number of characters.
+- The ``Content-Length`` header counts the number of bytes, instead of the number of characters.
+- The ``Access-Control-Allow-Methods`` response header contains only the HTTP methods to which webservices respond.
+- The :ref:`listjobs.json` webservice sets the ``log_url`` and ``items_url`` fields to ``null`` if the files don't exist.
 - The :ref:`schedule.json` webservice sets the ``node_name`` field in error responses.
 - The next pending job for all but one project was unreported by the :ref:`daemonstatus.json` and :ref:`listjobs.json` webservices, and was not cancellable by the :ref:`cancel.json` webservice.
 
@@ -115,6 +142,7 @@ Scrapyd is now tested on macOS and Windows, in addition to Linux.
 
 - The :ref:`cancel.json` webservice now works on Windows, by using SIGBREAK instead of SIGINT or SIGTERM.
 - The :ref:`dbs_dir` setting no longer causes an error if it contains a drive letter on Windows.
+- The :ref:`items_dir` setting is considered a local path if it contains a drive letter on Windows.
 - The :ref:`jobs_to_keep` setting no longer causes an error if a file to delete can't be deleted (for example, if the file is open on Windows).
 
 Removed
@@ -125,11 +153,13 @@ Removed
 - Remove the ``native_stringify_dict`` function.
 - Remove undocumented and unused internal environment variables:
 
-  - ``SCRAPY_FEED_URI`` to ``SCRAPYD_FEED_URI``
-  - ``SCRAPY_JOB`` to ``SCRAPYD_JOB``
-  - ``SCRAPY_LOG_FILE`` to ``SCRAPYD_LOG_FILE``
-  - ``SCRAPY_SLOT`` to ``SCRAPYD_SLOT``
-  - ``SCRAPY_SPIDER`` to ``SCRAPYD_SPIDER``
+  - ``SCRAPYD_FEED_URI``
+  - ``SCRAPYD_JOB``
+  - ``SCRAPYD_LOG_FILE``
+  - ``SCRAPYD_SLOT``
+  - ``SCRAPYD_SPIDER``
+
+- Drop support for end-of-life Python version 3.7.
 
 1.4.3 (2023-09-25)
 ------------------
@@ -337,7 +367,7 @@ Added
 Changed
 ~~~~~~~
 
-- Move scrapyd-deploy command to `scrapyd-client <https://pypi.org/project/scrapyd-client/>`__ package. (:commit:`c1358dc`, :commit:`c9d66ca`, :commit:`191353e`)
+- Move ``scrapyd-deploy`` command to `scrapyd-client <https://pypi.org/project/scrapyd-client/>`__ package. (:commit:`c1358dc`, :commit:`c9d66ca`, :commit:`191353e`)
 - Allow the :ref:`items_dir` setting to be a URL. (:commit:`e261591`, :commit:`35a21db`)
 - Look for a ``~/.scrapyd.conf`` file in the user's home directory. (:commit:`1fce99b`)
 

@@ -152,7 +152,7 @@ Default
   ``scrapyd.spiderqueue.SqliteSpiderQueue``
 Options
   -  ``scrapyd.spiderqueue.SqliteSpiderQueue`` stores spider queues in SQLite databases named after each project, in the :ref:`dbs_dir` directory
-  -  Implement your own, using the ``ISpiderQueue`` interface
+  -  Implement your own, using the :py:interface:`~scrapyd.interfaces.ISpiderQueue` interface
 Also used by
   -  :ref:`addversion.json` webservice, to create a queue if the project is new
   -  :ref:`schedule.json` webservice, to add a pending job
@@ -161,11 +161,7 @@ Also used by
   -  :ref:`daemonstatus.json` webservice, to count the pending jobs
   -  :ref:`webui`, to list the pending jobs and, if queues are transient, to create the queues per project at startup
 
-..
-
-   Community PostgreSQL and RabbitMQ queues:
-
-   https://github.com/scrapy/scrapyd/pull/140/files#diff-c479470812a00776da54c3cefc15bb5bb244b4056996ae972f4daba7f6ec5bd5
+.. Community PostgreSQL and RabbitMQ queues: https://github.com/scrapy/scrapyd/pull/140/files#diff-c479470812a00776da54c3cefc15bb5bb244b4056996ae972f4daba7f6ec5bd5
 
 Poller options
 --------------
@@ -185,9 +181,9 @@ Options
   -  ``scrapyd.poller.QueuePoller``. When using the default :ref:`application` and :ref:`launcher` values:
 
     -  The launcher adds :ref:`max_proc` capacity at startup, and one capacity each time a Scrapy process ends.
-    -  The :ref:`application` starts a timer so that, every :ref:`poll_interval` seconds, a job starts if there's capacity: that is, if the number of Scrapy processes that are running is less than the :ref:`max_proc` value.
+    -  The :ref:`application` starts a timer so that, every :ref:`poll_interval` seconds, jobs start if there's capacity: that is, if the number of Scrapy processes that are running is less than the :ref:`max_proc` value.
 
-  -  Implement your own, using the ``IPoller`` interface
+  -  Implement your own, using the :py:interface:`~scrapyd.interfaces.IPoller` interface
 
 .. _poll_interval:
 
@@ -200,8 +196,6 @@ Default
   ``5.0``
 Options
    Any floating-point number
-
-.. attention:: It is not recommended to use a low interval like 0.1 when using the default :ref:`spiderqueue` value. Consider a custom queue based on `queuelib <https://github.com/scrapy/queuelib>`__.
 
 .. _config-launcher:
 
@@ -251,6 +245,8 @@ logs_dir
 
 The directory in which to write Scrapy logs.
 
+A log file is written to ``{logs_dir}/{project}/{spider}/{job}.log``.
+
 To disable log storage, set this option to empty:
 
 .. code-block:: ini
@@ -282,11 +278,13 @@ items_dir
 
 The directory in which to write Scrapy items.
 
-If this option is non-empty, the `FEEDS <https://docs.scrapy.org/en/latest/topics/feed-exports.html#std-setting-FEEDS>`__ Scrapy setting is set as follows, resulting in feeds being written to the specified directory as JSON lines:
+An item feed is written to ``{items_dir}/{project}/{spider}/{job}.jl``.
+
+If this option is non-empty, the `FEEDS <https://docs.scrapy.org/en/latest/topics/feed-exports.html#std-setting-FEEDS>`__ Scrapy setting is set as follows, resulting in items being written to the above path as JSON lines:
 
 .. code-block:: json
 
-   {"value from items_dir": {"format": "jsonlines"}}
+   {"file:///path/to/items_dir/project/spider/job.jl": {"format": "jsonlines"}}
 
 Default
   ``""`` (empty), because it is recommended to instead use either:
@@ -303,13 +301,17 @@ Also used by
 jobs_to_keep
 ~~~~~~~~~~~~
 
-The number of finished jobs per spider, for which to keep log files in the :ref:`logs_dir` directory and item feeds in the :ref:`items_dir` directory.
+The number of finished jobs per spider, for which to keep the most recent log files in the :ref:`logs_dir` directory and item feeds in the :ref:`items_dir` directory.
 
 To "disable" this feature, set this to an arbitrarily large value. For example, on a 64-bit system:
 
 .. code-block:: ini
 
    jobs_to_keep = 9223372036854775807
+
+.. warning::
+
+   Scrapyd deletes old files in these directories, regardless of origin.
 
 Default
   ``5``
@@ -406,7 +408,7 @@ Options
   -  ``scrapyd.eggstorage.FilesystemEggStorage`` writes eggs in the :ref:`eggs_dir` directory
 
      .. note:: Eggs are named after the ``version``, replacing characters other than ``A-Za-z0-9_-`` with underscores. Therefore, if you frequently use non-word, non-hyphen characters, the eggs for different versions can collide.
-  -  Implement your own, using the ``IEggStorage`` interface: for example, to store eggs remotely
+  -  Implement your own, using the :py:interface:`~scrapyd.interfaces.IEggStorage` interface: for example, to store eggs remotely
 
 .. _eggs_dir:
 
@@ -437,7 +439,7 @@ Default
 Options
   -  ``scrapyd.jobstorage.MemoryJobStorage`` stores jobs in memory, such that jobs are lost when the Scrapyd process ends
   -  ``scrapyd.jobstorage.SqliteJobStorage`` stores jobs in a SQLite database named ``jobs.db``, in the :ref:`dbs_dir` directory
-  -  Implement your own, using the ``IJobStorage`` interface
+  -  Implement your own, using the :py:interface:`~scrapyd.interfaces.IJobStorage` interface
 
 .. _finished_to_keep:
 
@@ -488,6 +490,13 @@ If you want to add a webservice (endpoint), add, for example:
    mywebservice.json = amodule.anothermodule.MyWebService
 
 You can use code for webservices in `webservice.py <https://github.com/scrapy/scrapyd/blob/master/scrapyd/webservice.py>`__ as inspiration.
+
+To remove a :ref:`default webservice<config-default>`, set it to empty:
+
+.. code-block:: ini
+
+   [services]
+   daemonstatus.json =
 
 .. _config-settings:
 

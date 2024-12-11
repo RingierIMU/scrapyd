@@ -57,7 +57,7 @@ Parameters
            entry_points = {'scrapy': ['settings = projectname.settings']},
        )
 
-    Do this easily with the `scrapyd-deploy` command from the `scrapyd-client <https://github.com/scrapy/scrapyd-client>`__ package.
+    Do this easily with the ``scrapyd-deploy`` command from the `scrapyd-client <https://github.com/scrapy/scrapyd-client>`__ package.
 
 Example:
 
@@ -241,9 +241,13 @@ Get the pending, running and finished jobs of a project.
 
 -  Pending jobs are in :ref:`spider queues<spiderqueue>`.
 -  Running jobs have Scrapy processes.
--  Finished jobs are in job storage.
+-  Finished jobs are in :ref:job storage<jobstorage>`.
 
-   .. note:: The default :ref:`jobstorage` setting stores jobs in memory, such that jobs are lost when the Scrapyd process ends.
+   .. note::
+
+      -  The default :ref:`jobstorage` setting stores jobs in memory, such that jobs are lost when the Scrapyd process ends.
+      -  ``log_url`` is ``null`` in the response if :ref:`logs_dir` is disabled or the file doesn't exist.
+      -  ``items_url`` is ``null`` in the response if :ref:`items_dir` is disabled or the file doesn't exist.
 
 Supported request methods
   ``GET``
@@ -263,7 +267,10 @@ Example:
            {
                "id": "78391cc0fcaf11e1b0090800272a6d06",
                "project": "myproject",
-               "spider": "spider1"
+               "spider": "spider1",
+               "version": "0.1",
+               "settings": {"DOWNLOAD_DELAY=2"},
+               "args": {"arg1": "val1"},
            }
        ],
        "running": [
@@ -271,8 +278,10 @@ Example:
                "id": "422e608f9f28cef127b3d5ef93fe9399",
                "project": "myproject",
                "spider": "spider2",
+               "pid": 93956,
                "start_time": "2012-09-12 10:14:03.594664",
-               "pid": 93956
+               "log_url": "/logs/myproject/spider3/2f16646cfcaf11e1b0090800272a6d06.log",
+               "items_url": "/items/myproject/spider3/2f16646cfcaf11e1b0090800272a6d06.jl"
            }
        ],
        "finished": [

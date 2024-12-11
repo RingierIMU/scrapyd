@@ -1,21 +1,24 @@
 import datetime
 import io
+import json
 import os
 import re
 import sys
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, PropertyMock, call
 
 import pytest
+from twisted.logger import LogLevel, capturedLogs
 from twisted.web import error
 
 from scrapyd.exceptions import DirectoryTraversalError, RunnerError
 from scrapyd.interfaces import IEggStorage
-from scrapyd.jobstorage import Job
 from scrapyd.launcher import ScrapyProcessProtocol
 from scrapyd.webservice import spider_list
-from tests import get_egg_data, has_settings, root_add_version
+from tests import get_egg_data, get_finished_job, get_message, has_settings, root_add_version, touch
 
-job1 = Job(
+cliargs = [sys.executable, "-m", "scrapyd.runner", "crawl", "s2", "-s", "DOWNLOAD_DELAY=2", "-a", "arg1=val1"]
+
+job1 = get_finished_job(
     project="p1",
     spider="s1",
     job="j1",
@@ -26,9 +29,11 @@ job1 = Job(
 
 @pytest.fixture()
 def scrapy_process():
-    process = ScrapyProcessProtocol(project="p1", spider="s1", job="j1", env={}, args=[])
+    process = ScrapyProcessProtocol(project="p1", spider="s1", job="j1", env={}, args=cliargs)
     process.start_time = datetime.datetime(2001, 2, 3, 4, 5, 6, 9)
+    process.end_time = datetime.datetime(2001, 2, 3, 4, 5, 6, 10)
     process.transport = MagicMock()
+    type(process.transport).pid = PropertyMock(return_value=12345)
     return process
 
 
@@ -42,10 +47,12 @@ def add_test_version(app, project, version, basename):
 
 def assert_content(txrequest, root, method, basename, args, expected):
     txrequest.args = args.copy()
-    content = getattr(root.children[b"%b.json" % basename.encode()], f"render_{method}")(txrequest)
+    txrequest.method = method
+    content = root.children[b"%b.json" % basename.encode()].render(txrequest)
+    data = json.loads(content)
 
-    assert content.pop("node_name")
-    assert content == {"status": "ok", **expected}
+    assert data.pop("node_name")
+    assert data == {"status": "ok", **expected}
 
 
 def assert_error(txrequest, root, method, basename, args, message):
@@ -146,13 +153,57 @@ def test_invalid_type(txrequest, root):
     assert_error(txrequest, root, "POST", "schedule", args, message)
 
 
+@pytest.mark.parametrize(
+    ("method", "basename"),
+    [
+        ("GET", "daemonstatus"),
+        ("POST", "addversion"),
+        ("POST", "schedule"),
+        ("POST", "cancel"),
+        ("GET", "status"),
+        ("GET", "listprojects"),
+        ("GET", "listversions"),
+        ("GET", "listspiders"),
+        ("GET", "listjobs"),
+        ("POST", "delversion"),
+        ("POST", "delproject"),
+    ],
+)
+def test_options(txrequest, root, method, basename):
+    txrequest.method = "OPTIONS"
+
+    content = root.children[b"%b.json" % basename.encode()].render(txrequest)
+    expected = [b"OPTIONS, HEAD, %b" % method.encode()]
+
+    assert txrequest.code == 204
+    assert list(txrequest.responseHeaders.getAllRawHeaders()) == [
+        (b"Allow", expected),
+        (b"Access-Control-Allow-Origin", [b"*"]),
+        (b"Access-Control-Allow-Methods", expected),
+        (b"Access-Control-Allow-Headers", [b"X-Requested-With"]),
+        (b"Content-Length", [b"0"]),
+    ]
+    assert content == b""
+
+
 def test_debug(txrequest, root):
     root.debug = True
 
-    txrequest.method = "POST"
     txrequest.args = {b"project": [b"p"], b"spider": [b"s"], b"priority": [b"x"]}
-    response = root.children[b"schedule.json"].render(txrequest).decode()
+    txrequest.method = "POST"
 
+    with capturedLogs() as captured:
+        response = root.children[b"schedule.json"].render(txrequest).decode()
+    message = get_message(captured)
+
+    assert txrequest.code == 200
+    assert len(captured) == 1
+    assert captured[0]["log_level"] == LogLevel.critical
+    # The service is "scrapyd.webservice#critical" or "-" depending on whether twisted.python.log was loaded.
+    assert re.search(r"^\[\S+\] \nTraceback \(most recent call last\):", message)
+    assert message.endswith(
+        "twisted.web.error.Error: 200 priority is invalid: could not convert string to float: b'x'\n"
+    )
     assert response.startswith("Traceback (most recent call last):")
     assert response.endswith(
         "twisted.web.error.Error: 200 priority is invalid: could not convert string to float: b'x'\n"
@@ -242,8 +293,8 @@ def test_status(txrequest, root, scrapy_process, args):
     root.update_projects()
 
     if args:
-        root.launcher.finished.add(Job(project="p2", spider="s2", job="j1"))
-        root.launcher.processes[0] = ScrapyProcessProtocol("p2", "s2", "j1", {}, [])
+        root.launcher.finished.add(get_finished_job("p2", "s2", "j1"))
+        root.launcher.processes[0] = ScrapyProcessProtocol("p2", "s2", "j1", env={}, args=[])
         root.poller.queues["p2"].add("s2", _job="j1")
 
     expected = {"currstate": None}
@@ -271,15 +322,20 @@ def test_status_nonexistent(txrequest, root):
 
 
 @pytest.mark.parametrize("args", [{}, {b"project": [b"p1"]}])
-def test_list_jobs(txrequest, root, scrapy_process, args):
+@pytest.mark.parametrize("exists", [True, False])
+def test_list_jobs(txrequest, root, scrapy_process, args, exists, chdir):
     root_add_version(root, "p1", "r1", "mybot")
     root_add_version(root, "p2", "r2", "mybot2")
     root.update_projects()
 
     if args:
-        root.launcher.finished.add(Job(project="p2", spider="s2", job="j2"))
-        root.launcher.processes[0] = ScrapyProcessProtocol("p2", "s2", "j2", {}, [])
+        root.launcher.finished.add(get_finished_job("p2", "s2", "j2"))
+        root.launcher.processes[0] = ScrapyProcessProtocol("p2", "s2", "j2", env={}, args=[])
         root.poller.queues["p2"].add("s2", _job="j2")
+
+    if exists:
+        touch(chdir / "logs" / "p1" / "s1" / "j1.log")
+        touch(chdir / "items" / "p1" / "s1" / "j1.jl")
 
     expected = {"pending": [], "running": [], "finished": []}
     assert_content(txrequest, root, "GET", "listjobs", args, expected)
@@ -293,8 +349,8 @@ def test_list_jobs(txrequest, root, scrapy_process, args):
             "spider": "s1",
             "start_time": "2001-02-03 04:05:06.000007",
             "end_time": "2001-02-03 04:05:06.000008",
-            "items_url": "/items/p1/s1/j1.jl",
-            "log_url": "/logs/p1/s1/j1.log",
+            "log_url": "/logs/p1/s1/j1.log" if exists else None,
+            "items_url": "/items/p1/s1/j1.jl" if exists and root.local_items else None,
         },
     )
     assert_content(txrequest, root, "GET", "listjobs", args, expected)
@@ -306,8 +362,10 @@ def test_list_jobs(txrequest, root, scrapy_process, args):
             "id": "j1",
             "project": "p1",
             "spider": "s1",
-            "start_time": "2001-02-03 04:05:06.000009",
             "pid": None,
+            "start_time": "2001-02-03 04:05:06.000009",
+            "log_url": "/logs/p1/s1/j1.log" if exists else None,
+            "items_url": "/items/p1/s1/j1.jl" if exists and root.local_items else None,
         }
     )
     assert_content(txrequest, root, "GET", "listjobs", args, expected)
@@ -318,7 +376,7 @@ def test_list_jobs(txrequest, root, scrapy_process, args):
         _job="j1",
         _version="0.1",
         settings={"DOWNLOAD_DELAY=2": "TRACK=Cause = Time"},
-        other="one",
+        arg1="val1",
     )
 
     expected["pending"].append(
@@ -328,7 +386,7 @@ def test_list_jobs(txrequest, root, scrapy_process, args):
             "spider": "s1",
             "version": "0.1",
             "settings": {"DOWNLOAD_DELAY=2": "TRACK=Cause = Time"},
-            "args": {"other": "one"},
+            "args": {"arg1": "val1"},
         },
     )
     assert_content(txrequest, root, "GET", "listjobs", args, expected)
@@ -485,11 +543,13 @@ def test_schedule(txrequest, root, args, run_only_if_has_settings):
     assert root.poller.queues[project].list() == []
 
     txrequest.args = args.copy()
-    content = root.children[b"schedule.json"].render_POST(txrequest)
-    jobid = content.pop("jobid")
+    txrequest.method = "POST"
+    content = root.children[b"schedule.json"].render(txrequest)
+    data = json.loads(content)
+    jobid = data.pop("jobid")
 
-    assert content.pop("node_name")
-    assert content == {"status": "ok"}
+    assert data.pop("node_name")
+    assert data == {"status": "ok"}
     assert re.search(r"^[a-z0-9]{32}$", jobid)
 
     jobs = root.poller.queues[project].list()
@@ -501,6 +561,23 @@ def test_schedule(txrequest, root, args, run_only_if_has_settings):
     assert jobs[0] == expected
 
 
+def test_schedule_unique(txrequest, root_with_egg):
+    args = {b"project": [b"quotesbot"], b"spider": [b"toscrape-css"]}
+    txrequest.method = "POST"
+
+    txrequest.args = args.copy()
+    content = root_with_egg.children[b"schedule.json"].render(txrequest)
+    data = json.loads(content)
+
+    jobid = data.pop("jobid")
+
+    txrequest.args = args.copy()
+    content = root_with_egg.children[b"schedule.json"].render(txrequest)
+    data = json.loads(content)
+
+    assert data.pop("jobid") != jobid
+
+
 def test_schedule_parameters(txrequest, root_with_egg):
     txrequest.args = {
         b"project": [b"quotesbot"],
@@ -509,12 +586,14 @@ def test_schedule_parameters(txrequest, root_with_egg):
         b"jobid": [b"aaa"],
         b"priority": [b"5"],
         b"setting": [b"DOWNLOAD_DELAY=2", b"TRACK=Cause = Time"],
-        b"other": [b"one", b"two"],
+        b"arg1": [b"val1", b"val2"],
     }
-    content = root_with_egg.children[b"schedule.json"].render_POST(txrequest)
+    txrequest.method = "POST"
+    content = root_with_egg.children[b"schedule.json"].render(txrequest)
+    data = json.loads(content)
 
-    assert content.pop("node_name")
-    assert content == {"status": "ok", "jobid": "aaa"}
+    assert data.pop("node_name")
+    assert data == {"status": "ok", "jobid": "aaa"}
 
     jobs = root_with_egg.poller.queues["quotesbot"].list()
 
@@ -527,7 +606,7 @@ def test_schedule_parameters(txrequest, root_with_egg):
             "DOWNLOAD_DELAY": "2",
             "TRACK": "Cause = Time",
         },
-        "other": "one",  # users are encouraged in api.rst to open an issue if they want multiple values
+        "arg1": "val1",  # users are encouraged in api.rst to open an issue if they want multiple values
     }
 
 
@@ -576,7 +655,7 @@ def test_cancel(txrequest, root, scrapy_process, args):
 
     root.launcher.processes[0] = scrapy_process
     root.launcher.processes[1] = scrapy_process
-    root.launcher.processes[2] = ScrapyProcessProtocol("p2", "s2", "j2", {}, [])
+    root.launcher.processes[2] = ScrapyProcessProtocol("p2", "s2", "j2", env={}, args=[])
 
     expected["prevstate"] = "running"
     assert_content(txrequest, root, "POST", "cancel", args, expected)
@@ -606,22 +685,22 @@ def test_project_directory_traversal_notfound(txrequest, root, method, basename,
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "attach_egg", "method"),
+    ("method", "basename", "attach_egg"),
     [
-        (b"addversion.json", True, "render_POST"),
-        (b"listversions.json", False, "render_GET"),
-        (b"delproject.json", False, "render_POST"),
-        (b"delversion.json", False, "render_POST"),
+        ("POST", "addversion", True),
+        ("GET", "listversions", False),
+        ("POST", "delproject", False),
+        ("POST", "delversion", False),
     ],
 )
-def test_project_directory_traversal(txrequest, root, endpoint, attach_egg, method):
+def test_project_directory_traversal(txrequest, root, method, basename, attach_egg):
     txrequest.args = {b"project": [b"../p"], b"version": [b"0.1"]}
 
     if attach_egg:
         txrequest.args[b"egg"] = [get_egg_data("quotesbot")]
 
     with pytest.raises(DirectoryTraversalError) as exc:
-        getattr(root.children[endpoint], method)(txrequest)
+        getattr(root.children[b"%b.json" % basename.encode()], f"render_{method}")(txrequest)
 
     assert str(exc.value) == "../p"
 
