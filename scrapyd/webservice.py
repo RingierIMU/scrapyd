@@ -337,6 +337,9 @@ class ListJobs(WsResource):
        Add ``log_url`` and ``items_url`` to finished jobs in the response.
     .. versionchanged:: 1.5.0
        Add ``version``, ``settings`` and ``args`` to pending jobs in the response.
+    .. versionchanged:: 1.5.0+restart-safe-jobs
+       Add ``interrupted`` to finished jobs in the response: true for a job that was still running when Scrapyd
+       stopped.
     """
 
     @param("project", required=False)
@@ -378,6 +381,7 @@ class ListJobs(WsResource):
                     "spider": finished.spider,
                     "start_time": str(finished.start_time),
                     "end_time": str(finished.end_time),
+                    "interrupted": getattr(finished, "interrupted", False),
                     "log_url": self.root.get_log_url(finished),
                     "items_url": self.root.get_item_url(finished),
                 }

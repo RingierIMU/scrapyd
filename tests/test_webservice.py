@@ -349,6 +349,7 @@ def test_list_jobs(txrequest, root, scrapy_process, args, exists, chdir):
             "spider": "s1",
             "start_time": "2001-02-03 04:05:06.000007",
             "end_time": "2001-02-03 04:05:06.000008",
+            "interrupted": False,
             "log_url": "/logs/p1/s1/j1.log" if exists else None,
             "items_url": "/items/p1/s1/j1.jl" if exists and root.local_items else None,
         },

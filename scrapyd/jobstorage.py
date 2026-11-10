@@ -47,8 +47,9 @@ class SqliteJobStorage:
         return len(self.jobs)
 
     def __iter__(self):
-        for project, spider, jobid, start_time, end_time in self.jobs:
+        for project, spider, jobid, start_time, end_time, interrupted in self.jobs:
             job = ScrapyProcessProtocol(project, spider, jobid, env={}, args=[])
             job.start_time = start_time
             job.end_time = end_time
+            job.interrupted = interrupted
             yield job

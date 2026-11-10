@@ -332,6 +332,33 @@ Options
 Also used by
   :ref:`listspiders.json` webservice, to run Scrapy's `list <https://docs.scrapy.org/en/latest/topics/commands.html#list>`__ command
 
+.. _requeue_interrupted:
+
+requeue_interrupted
+~~~~~~~~~~~~~~~~~~~
+
+The launcher records each running job in the ``running_jobs`` table of ``jobs.db`` in :ref:`dbs_dir`. A job still
+recorded when Scrapyd starts was interrupted (by a restart, a crash or a host reboot). It is added to the finished jobs
+with ``interrupted`` set and, if this option is on, put back on its project's queue with the same job ID and the
+same spider arguments and settings. A spider that sets ``JOBDIR`` from the job ID then resumes where it stopped.
+
+Default
+  ``on``
+
+.. _shutdown_timeout:
+
+shutdown_timeout
+~~~~~~~~~~~~~~~~
+
+When Scrapyd stops, it sends SIGTERM to each running Scrapy process (a graceful stop: Scrapy finishes in-flight
+requests and saves ``JOBDIR`` state) and waits up to this many seconds for them to exit, then kills any left.
+Their jobs stay recorded as running, so the next start treats them as interrupted.
+
+Set the container's or service manager's stop timeout above this value, or the processes are killed first.
+
+Default
+  ``240``
+
 Web UI and API options
 ----------------------
 

@@ -1,3 +1,4 @@
+import copy
 import datetime
 import multiprocessing
 import sys
@@ -7,7 +8,7 @@ from twisted.application.service import Service
 from twisted.internet import defer, error, protocol, reactor
 from twisted.logger import Logger
 
-from scrapyd import __version__
+from scrapyd import __version__, sqlite
 from scrapyd.interfaces import IEnvironment, IJobStorage, IPoller
 
 log = Logger()
@@ -36,8 +37,15 @@ class Launcher(Service):
         self.max_proc = self._get_max_proc(config)
         self.runner = config.get("runner", "scrapyd.runner")
         self.app = app
+        # Jobs survive a restart: running jobs are recorded, and on start any left over are marked interrupted in
+        # the finished jobs and, optionally, put back on their project's queue with the same job ID.
+        self.running_jobs = sqlite.initialize(sqlite.SqliteRunningJobs, config, "jobs", "running_jobs")
+        self.requeue_interrupted = config.getboolean("requeue_interrupted", True)
+        self.shutdown_timeout = config.getfloat("shutdown_timeout", 240)
+        self.stopping = False
 
     def startService(self):
+        self._recover_interrupted_jobs()
         for slot in range(self.max_proc):
             self._get_message(slot)
         log.info(
@@ -48,12 +56,99 @@ class Launcher(Service):
             log_system="Launcher",
         )
 
+    def stopService(self):
+        """
+        Ask every running Scrapy process to stop gracefully (SIGTERM: Scrapy finishes in-flight requests, runs its
+        close handlers and saves JOBDIR state), and wait for them to exit, for at most ``shutdown_timeout`` seconds.
+        Processes still running after that are killed.
+
+        Their running-job rows are kept, so the next start marks them interrupted and re-queues them.
+        """
+        self.stopping = True
+        Service.stopService(self)
+
+        processes = list(self.processes.values())
+        if not processes:
+            return defer.succeed(None)
+
+        log.info(
+            "Stopping {count} running job(s), waiting up to {timeout}s",
+            count=len(processes),
+            timeout=self.shutdown_timeout,
+            log_system="Launcher",
+        )
+        for process in processes:
+            _signal(process, "TERM")
+
+        done = defer.DeferredList([process.deferred for process in processes], consumeErrors=True)
+        timer = reactor.callLater(self.shutdown_timeout, self._kill_remaining)
+        done.addBoth(lambda _: timer.cancel() if timer.active() else None)
+        return done
+
+    def _kill_remaining(self):
+        for process in list(self.processes.values()):
+            log.warn(
+                "Job did not stop within {timeout}s, killing: project={project!r} spider={spider!r} job={job!r}",
+                timeout=self.shutdown_timeout,
+                project=process.project,
+                spider=process.spider,
+                job=process.job,
+                log_system="Launcher",
+            )
+            _signal(process, "KILL")
+
+    def _recover_interrupted_jobs(self):
+        queues = self.app.getComponent(IPoller).queues
+        now = datetime.datetime.now()
+        for message, start_time in self.running_jobs:
+            project, spider, job = message["_project"], message["_spider"], message["_job"]
+
+            interrupted = ScrapyProcessProtocol(project, spider, job, env={}, args=[])
+            interrupted.start_time = start_time
+            interrupted.end_time = now
+            interrupted.interrupted = True
+            self.finished.add(interrupted)
+
+            requeued = False
+            if self.requeue_interrupted:
+                if project in queues:
+                    spider_args = {k: v for k, v in message.items() if k not in ("_project", "_spider")}
+                    queues[project].add(spider, **spider_args)
+                    requeued = True
+                else:
+                    log.warn(
+                        "Interrupted job's project no longer exists, not re-queued: project={project!r} job={job!r}",
+                        project=project,
+                        job=job,
+                        log_system="Launcher",
+                    )
+
+            log.info(
+                "Job interrupted by the previous shutdown{action}: project={project!r} spider={spider!r} job={job!r}",
+                action=", re-queued" if requeued else "",
+                project=project,
+                spider=spider,
+                job=job,
+                log_system="Launcher",
+            )
+            self.running_jobs.remove(project, job)
+
     def _get_message(self, slot):
         poller = self.app.getComponent(IPoller)
         poller.next().addCallback(self._spawn_process, slot)
 
     def _spawn_process(self, message, slot):
         project = message["_project"]
+        if self.stopping:
+            # The poller handed over a job after shutdown began: put it back rather than lose it.
+            queue = self.app.getComponent(IPoller).queues.get(project)
+            if queue is not None:
+                queue.add(message["_spider"], **{k: v for k, v in message.items() if k not in ("_project", "_spider")})
+            return
+
+        # As received from the queue, before the environment adds per-run settings (log and feed paths).
+        original = copy.deepcopy(message)
+
         environment = self.app.getComponent(IEnvironment)
         message.setdefault("settings", {})
         message["settings"].update(environment.get_settings(message))
@@ -64,13 +159,18 @@ class Launcher(Service):
         process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)
         process.deferred.addBoth(self._process_finished, slot)
 
+        self.running_jobs.add(project, process.job, process.start_time, original)
         reactor.spawnProcess(process, sys.executable, args=args, env=env)
         self.processes[slot] = process
 
     def _process_finished(self, _, slot):
         process = self.processes.pop(slot)
+        if self.stopping:
+            # Interrupted by shutdown: keep the running-job row, so the next start records and re-queues it.
+            return
         process.end_time = datetime.datetime.now()
         self.finished.add(process)
+        self.running_jobs.remove(process.project, process.job)
         self._get_message(slot)
 
     def _get_max_proc(self, config):
@@ -94,6 +194,7 @@ class ScrapyProcessProtocol(protocol.ProcessProtocol):
         self.pid = None
         self.start_time = datetime.datetime.now()
         self.end_time = None
+        self.interrupted = False
         self.args = args
         self.env = env
         self.deferred = defer.Deferred()
@@ -146,3 +247,10 @@ class ScrapyProcessProtocol(protocol.ProcessProtocol):
             pid=self.pid,
             args=self.args,
         )
+
+
+def _signal(process, signal):
+    try:
+        process.transport.signalProcess(signal)
+    except (AttributeError, error.ProcessExitedAlready):  # not started yet, or already exited
+        pass

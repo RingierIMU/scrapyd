@@ -125,13 +125,21 @@ class SqliteFinishedJobs(SqliteMixin):
 
         self.conn.execute(
             f"CREATE TABLE IF NOT EXISTS {table} "
-            "(id integer PRIMARY KEY, project text, spider text, job text, start_time datetime, end_time datetime)"
+            "(id integer PRIMARY KEY, project text, spider text, job text, start_time datetime, end_time datetime, "
+            "interrupted integer NOT NULL DEFAULT 0)"
         )
+        # Databases created before the "interrupted" column existed. Readers that select columns by name (including
+        # older Scrapyd versions) are unaffected by the extra column.
+        columns = [row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")]
+        if "interrupted" not in columns:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN interrupted integer NOT NULL DEFAULT 0")
+            self.conn.commit()
 
     def add(self, job):
         self.conn.execute(
-            f"INSERT INTO {self.table} (project, spider, job, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
-            (job.project, job.spider, job.job, job.start_time, job.end_time),
+            f"INSERT INTO {self.table} (project, spider, job, start_time, end_time, interrupted) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (job.project, job.spider, job.job, job.start_time, job.end_time, int(getattr(job, "interrupted", False))),
         )
         self.conn.commit()
 
@@ -154,8 +162,47 @@ class SqliteFinishedJobs(SqliteMixin):
                 job,
                 datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f"),
                 datetime.datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S.%f"),
+                bool(interrupted),
             )
-            for project, spider, job, start_time, end_time in self.conn.execute(
-                f"SELECT project, spider, job, start_time, end_time FROM {self.table} ORDER BY end_time DESC"
+            for project, spider, job, start_time, end_time, interrupted in self.conn.execute(
+                f"SELECT project, spider, job, start_time, end_time, interrupted FROM {self.table} "
+                "ORDER BY end_time DESC"
+            )
+        )
+
+
+class SqliteRunningJobs(SqliteMixin):
+    """
+    SQLite record of the jobs the launcher is running.
+
+    A row is written when a job's process is spawned and deleted when it ends normally. Rows left over when Scrapyd
+    starts belong to jobs that were interrupted by a restart, a crash or a host reboot.
+    """
+
+    def __init__(self, database=None, table="running_jobs"):
+        super().__init__(database, table)
+
+        self.conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} "
+            "(id integer PRIMARY KEY, project text, job text, start_time datetime, message blob)"
+        )
+
+    def add(self, project, job, start_time, message):
+        self.conn.execute(
+            f"INSERT INTO {self.table} (project, job, start_time, message) VALUES (?, ?, ?, ?)",
+            (project, job, start_time, self.encode(message)),
+        )
+        self.conn.commit()
+
+    def remove(self, project, job):
+        self.conn.execute(f"DELETE FROM {self.table} WHERE project = ? AND job = ?", (project, job))
+        self.conn.commit()
+
+    def __iter__(self):
+        """Yield (message, start_time) for each row, oldest first."""
+        return (
+            (self.decode(message), datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f"))
+            for message, start_time in list(
+                self.conn.execute(f"SELECT message, start_time FROM {self.table} ORDER BY id")
             )
         )

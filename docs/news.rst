@@ -6,6 +6,14 @@ Release notes
 Unreleased
 ----------
 
+Added
+~~~~~
+
+- Jobs survive a Scrapyd restart. The launcher records running jobs in ``jobs.db``. On start, jobs left from the last
+  run are added to the finished jobs with ``interrupted`` set (also in :ref:`listjobs.json`) and re-queued with the
+  same job ID, unless :ref:`requeue_interrupted` is off.
+- On stop, running Scrapy processes get SIGTERM and up to :ref:`shutdown_timeout` seconds to exit.
+
 Removed
 ~~~~~~~
 
