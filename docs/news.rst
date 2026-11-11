@@ -13,6 +13,7 @@ Added
   run are added to the finished jobs with ``interrupted`` set (also in :ref:`listjobs.json`) and re-queued with the
   same job ID, unless :ref:`requeue_interrupted` is off.
 - On stop, running Scrapy processes get SIGTERM and up to :ref:`shutdown_timeout` seconds to exit.
+- :ref:`shutdown_marker` lets a spider tell a Scrapyd stop from a :ref:`cancel.json`, which sends the same signal.
 
 Removed
 ~~~~~~~

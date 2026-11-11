@@ -200,6 +200,79 @@ def test_job_handed_over_during_stop_goes_back_on_the_queue(app, config, queues)
     assert list(running_jobs(config)) == []
 
 
+def test_shutdown_marker_is_off_by_default(app, config, chdir):
+    launcher = Launcher(config, app)
+    launcher._spawn_process(dict(MESSAGE, settings=dict(MESSAGE["settings"])), 0)  # noqa: SLF001
+    assert "SCRAPYD_SHUTDOWN_MARKER" not in launcher.processes[0].env
+
+    add_fake_process(launcher, 1, FakeProcess(job="j2"))
+    launcher.stopService()
+    assert not any(p.name.startswith(".shutting") for p in chdir.rglob("*"))
+
+
+def test_shutdown_marker_path_is_passed_to_each_crawl(app, config, tmp_path):
+    marker = tmp_path / "state" / ".shutting-down"
+    config.cp.set(config.SECTION, "shutdown_marker", str(marker))
+    launcher = Launcher(config, app)
+
+    launcher._spawn_process(dict(MESSAGE, settings=dict(MESSAGE["settings"])), 0)  # noqa: SLF001
+
+    assert launcher.processes[0].env["SCRAPYD_SHUTDOWN_MARKER"] == str(marker)
+    assert not marker.exists()
+
+
+def test_stop_writes_the_shutdown_marker_before_signalling(app, config, tmp_path):
+    marker = tmp_path / "state" / ".shutting-down"
+    config.cp.set(config.SECTION, "shutdown_marker", str(marker))
+    launcher = Launcher(config, app)
+    seen = []
+
+    class MarkerCheckingTransport(FakeTransport):
+        def signalProcess(self, signal):  # noqa: N802 Twisted API
+            seen.append((signal, marker.exists()))
+
+    process = FakeProcess()
+    process.transport = MarkerCheckingTransport()
+    add_fake_process(launcher, 0, process)
+
+    launcher.stopService()
+
+    # The crawl reads the marker when it closes, which is after the signal, so it must already be there.
+    assert seen == [("TERM", True)]
+    process.deferred.callback(process)
+    assert marker.exists()  # stays until the next start
+
+
+def test_start_removes_a_leftover_shutdown_marker(app, config, queues, tmp_path):
+    marker = tmp_path / ".shutting-down"
+    marker.write_text("1 2026-11-11T00:00:00\n")
+    config.cp.set(config.SECTION, "shutdown_marker", str(marker))
+
+    Launcher(config, app).startService()
+
+    assert not marker.exists()
+
+
+def test_start_without_a_shutdown_marker_file(app, config, queues, tmp_path):
+    config.cp.set(config.SECTION, "shutdown_marker", str(tmp_path / ".shutting-down"))
+    Launcher(config, app).startService()
+
+
+def test_unwritable_shutdown_marker_is_logged_and_the_stop_goes_on(app, config, tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    config.cp.set(config.SECTION, "shutdown_marker", str(blocker / ".shutting-down"))
+    launcher = Launcher(config, app)
+    process = FakeProcess()
+    add_fake_process(launcher, 0, process)
+
+    with capturedLogs() as captured:
+        launcher.stopService()
+
+    assert process.transport.signals == ["TERM"]
+    assert any(e["log_level"] == LogLevel.error and "shutdown marker" in formatEvent(e) for e in captured)
+
+
 def test_finished_jobs_table_from_before_the_interrupted_column_is_migrated(tmp_path):
     database = str(tmp_path / "jobs.db")
     conn = sqlite3.connect(database)

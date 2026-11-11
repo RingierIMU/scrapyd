@@ -1,6 +1,7 @@
 import copy
 import datetime
 import multiprocessing
+import os
 import sys
 from itertools import chain
 
@@ -42,9 +43,14 @@ class Launcher(Service):
         self.running_jobs = sqlite.initialize(sqlite.SqliteRunningJobs, config, "jobs", "running_jobs")
         self.requeue_interrupted = config.getboolean("requeue_interrupted", True)
         self.shutdown_timeout = config.getfloat("shutdown_timeout", 240)
+        # A file that exists only while Scrapyd is stopping. Its path is passed to each crawl as
+        # SCRAPYD_SHUTDOWN_MARKER, so a crawl that gets SIGTERM can tell a Scrapyd stop (it will be re-queued, so keep
+        # its JOBDIR) from a cancel.json, which sends the same signal.
+        self.shutdown_marker = config.get("shutdown_marker", "")
         self.stopping = False
 
     def startService(self):
+        self._remove_shutdown_marker()
         self._recover_interrupted_jobs()
         for slot in range(self.max_proc):
             self._get_message(slot)
@@ -66,6 +72,7 @@ class Launcher(Service):
         """
         self.stopping = True
         Service.stopService(self)
+        self._write_shutdown_marker()
 
         processes = list(self.processes.values())
         if not processes:
@@ -84,6 +91,29 @@ class Launcher(Service):
         timer = reactor.callLater(self.shutdown_timeout, self._kill_remaining)
         done.addBoth(lambda _: timer.cancel() if timer.active() else None)
         return done
+
+    def _write_shutdown_marker(self):
+        if not self.shutdown_marker:
+            return
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.shutdown_marker)), exist_ok=True)
+            with open(self.shutdown_marker, "w") as f:
+                f.write(f"{os.getpid()} {datetime.datetime.now().isoformat()}\n")
+        except OSError as e:
+            log.error(
+                "Could not write the shutdown marker {path!r}, crawls will treat this stop as a cancel: {error}",
+                path=self.shutdown_marker,
+                error=e,
+                log_system="Launcher",
+            )
+
+    def _remove_shutdown_marker(self):
+        if not self.shutdown_marker:
+            return
+        try:
+            os.remove(self.shutdown_marker)
+        except FileNotFoundError:
+            pass
 
     def _kill_remaining(self):
         for process in list(self.processes.values()):
@@ -154,6 +184,8 @@ class Launcher(Service):
         message["settings"].update(environment.get_settings(message))
 
         env = environment.get_environment(message, slot)
+        if self.shutdown_marker:
+            env["SCRAPYD_SHUTDOWN_MARKER"] = os.path.abspath(self.shutdown_marker)
         args = [sys.executable, "-m", self.runner, "crawl", *get_crawl_args(message)]
 
         process = ScrapyProcessProtocol(project, message["_spider"], message["_job"], env, args)

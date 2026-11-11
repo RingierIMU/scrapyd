@@ -359,6 +359,22 @@ Set the container's or service manager's stop timeout above this value, or the p
 Default
   ``240``
 
+.. _shutdown_marker:
+
+shutdown_marker
+~~~~~~~~~~~~~~~
+
+A file path. When set, Scrapyd creates this file when it starts stopping, before it signals the running Scrapy
+processes, and deletes it when it starts. Each Scrapy process gets the path in the ``SCRAPYD_SHUTDOWN_MARKER``
+environment variable.
+
+:ref:`cancel.json` sends the same SIGTERM, so a spider can't tell a cancel from a Scrapyd stop by the signal alone. A
+spider that finds this file when it closes with reason ``shutdown`` is being stopped by Scrapyd and will be re-queued
+(see :ref:`requeue_interrupted`), so it should keep its ``JOBDIR``. Without the file, it was cancelled.
+
+Default
+  ``""`` (off)
+
 Web UI and API options
 ----------------------
 
